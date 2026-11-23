@@ -1,0 +1,61 @@
+@startuml
+!pragma layout smetana
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam defaultFontName SansSerif
+skinparam defaultFontSize 13
+skinparam ArrowColor #475569
+skinparam packageBorderColor #94A3B8
+skinparam componentBackgroundColor #EFF6FF
+skinparam databaseBackgroundColor #F0FDF4
+skinparam nodesep 45
+skinparam ranksep 50
+title Сервис онлайн-бронирования жилья\nЦелевая архитектура: 1 млн MAU, около 200 API RPS в пик
+
+actor "Гость / владелец" as client
+cloud "CDN\nФото и статика" as cdn
+cloud "Облачный L4 LB\nRound-robin + health checks" as lb
+
+package "Один регион, зоны доступности A / B / C" {
+  component "Nginx ×2\nЗоны A/B, least_conn" as nginx
+  component "API на Go ×2\nКаталог / пользователи / брони\nЗоны A/B" as api
+  component "Worker на Go ×2\nOutbox / письма / фото / отчёты\nЗоны A/B" as worker
+  database "PostgreSQL primary\nЗона A\nДанные + outbox + задания" as pg
+  database "PostgreSQL standby\nЗона B" as replica
+  database "Redis ×1\nКэш, допустима потеря" as redis
+  queue "RabbitMQ ×3\nЗоны A/B/C\nQuorum 2 из 3" as mq
+  component "Prometheus / Grafana\nAlertmanager" as monitoring
+}
+
+cloud "S3 (управляемый)\nФото / статика / логи / бэкапы" as s3
+cloud "S3 другого региона\nКопии БД + WAL" as backups
+cloud "Почтовый провайдер" as mail
+
+client --> lb : HTTPS / API
+lb --> nginx : TCP
+nginx --> api : HTTP / JSON
+client --> cdn : HTTPS GET
+cdn --> s3 : GET при промахе
+client ..> s3 : Подписанный PUT фото
+api --> pg : SQL / транзакции
+api --> redis : RESP / кэш
+pg --> replica : Синхронный WAL
+worker --> pg : SQL / outbox / задания
+worker --> mq : AMQP publish + confirm
+mq --> worker : Доставка + ACK
+worker --> mail : HTTPS / уведомления
+worker --> s3 : Фото / миниатюры
+pg ..> s3 : Base backup + WAL
+s3 ..> backups : Копирование бэкапов БД
+monitoring ..> api : Метрики
+monitoring ..> pg : Exporter
+monitoring ..> mq : Метрики очереди
+
+legend bottom
+  Сплошные стрелки — рабочие потоки; пунктир — вспомогательные связи.
+  Nginx, API и worker совместно размещены на двух VM в A/B.
+  Exporter-ы остальных узлов и архивирование логов опущены для читаемости.
+  Оплата при заселении; платёжного сервиса нет.
+endlegend
+@enduml
